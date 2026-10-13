@@ -788,23 +788,35 @@ mpcsh_windowlaunch_builtin(char **argv)
     if (!argv || !argv[0] || strcmp(argv[0], "windowlaunch") != 0)
         return -1;
 
+    char *cmd = argv[1];
+    if (!cmd) {
+        fprintf(stderr, "mpcsh: windowlaunch: missing command\n");
+        return 2;
+    }
+
     /* Parse windowlaunch command */
     /* windowlaunch --persist <title> <command> */
-    if (strstr(argv[1], "--persist")) {
+    if (strstr(cmd, "--persist")) {
         char *title = strtok(argv[2], " ");
         char *command = strtok(NULL, " ");
         if (title && command) {
             printf("Window '%s' launched with command: %s (persist mode)\n", title, command);
+        } else {
+            fprintf(stderr, "mpcsh: windowlaunch: --persist requires <title> <command>\n");
+            return 2;
         }
     }
     /* windowlaunch --title <title> --command <cmd> --width <w> --height <h> */
-    else if (strstr(argv[1], "--title")) {
+    else if (strstr(cmd, "--title")) {
         char *title = strtok(argv[2], " ");
         char *command = strtok(argv[4], " ");
         int width = atoi(strtok(argv[6], " "));
         int height = atoi(strtok(argv[8], " "));
         if (title && command && width > 0 && height > 0)
-            return 0; else return -1;
+            return 0; else {
+            fprintf(stderr, "mpcsh: windowlaunch: --title requires <title> --command <cmd> --width <w> --height <h>\n");
+            return 2;
+        }
     }
 
     return 0;
@@ -815,6 +827,11 @@ mpcsh_window_terminate_builtin(char **argv)
 {
     if (!argv || !argv[0] || strcmp(argv[0], "windowterminate") != 0)
         return -1;
+
+    if (!argv[1]) {
+        fprintf(stderr, "mpcsh: windowterminate: missing window ID\n");
+        return 2;
+    }
 
     int window_id = atoi(argv[1]);
     printf("Window %d terminated.\n", window_id);
