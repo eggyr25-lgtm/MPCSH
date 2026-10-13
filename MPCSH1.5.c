@@ -1873,6 +1873,11 @@ mpcsh_run_pipeline(char *cmdline)
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
+        if (!strcmp(argv[0], "cwd")) {
+            int result = mpcsh_pwd_builtin(argv);
+            mpcsh_free_argv(argv); g_free(work);
+            mpcsh_last_status = result; return result;
+        }
         if (!strcmp(argv[0], "status")) {
             int result = mpcsh_status_builtin(argv);
             mpcsh_free_argv(argv); g_free(work);
@@ -4390,7 +4395,7 @@ mpcsh_repl(void)
             "\033[1;95m✦ MarekPC Shell\033[0m \033[1;35m— mpcsh\033[0m\n"
             "\033[0;36mPipeline limit: %d  |  $() supported\n\033[0m"
             "\033[0;36m↑/↓ history  ←/→ cursor  Ctrl+C cancels the current line; Ctrl+O inserts newline\033[0m\n"
-            "\033[0;36mBuilt-ins: ctk, portmap, guiinterm, wallpaper, ls, mpcimgcat, colorit, help, limits, mpcupdate, mpcbits, mpcversion\033[0m\n\n",
+            "\033[0;36mBuilt-ins: ctk, portmap, guiinterm, wallpaper, ls, mpcimgcat, colorit, help, limits, pwd, cwd, mpcupdate, mpcbits, mpcversion\033[0m\n\n",
             MPCSH_MAX_PIPELINE);
 
     if (mpcsh_ai_agent_detected())
