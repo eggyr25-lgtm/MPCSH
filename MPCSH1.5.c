@@ -935,11 +935,28 @@ static void mpcsh_spawn_window_child(MpcshWindow *w)
     }
 
     if (pid == 0) {
-        /* Child process - run the command */
+        /* Child process - run the command and capture stdout/stderr */
         close(pipefd[0]); /* close read end */
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+
+        /* Block known GUI applications to prevent separate Wayland/X11 windows */
+        const char *blocked_apps[] = {
+            "konsole", "gnome-terminal", "xterm", "kate", "firefox", 
+            "chromium", "google-chrome", "code", "gedit", "krita",
+            "gimp", "vlc", "mpv", "spotify", "discord"
+        };
+        int blocked_count = sizeof(blocked_apps) / sizeof(blocked_apps[0]);
+        
+        /* Check if the command is a GUI app */
+        for (int i = 0; i < blocked_count; i++) {
+            if (strstr(w->command, blocked_apps[i])) {
+                fprintf(stderr, "mpcsh: windowlaunch: '%s' is a GUI app and cannot run in terminal window.\n", blocked_apps[i]);
+                fprintf(stderr, "mpcsh: windowlaunch: Use --cli mode for terminal output.\n");
+                _exit(127);
+            }
+        }
 
         /* Execute the command */
         char *argv[256];
@@ -953,18 +970,43 @@ static void mpcsh_spawn_window_child(MpcshWindow *w)
 
         if (argc > 0) {
             execvp(argv[0], argv);
-            perror("execvp");
+            /* If execvp fails, print error and exit */
+            fprintf(stderr, "mpcsh: windowlaunch: %s: command not found\n", argv[0]);
+            _exit(127);
         }
         _exit(127);
     }
 
-    /* Parent */
+    /* Parent - close write end and wait for child to complete */
     close(pipefd[1]); /* close write end */
     w->child_pid = pid;
     w->out_pipe = pipefd[0];
     w->buf_len = 4096;
     w->buffer = g_malloc(w->buf_len);
+    w->buffer[0] = '\0';
     w->buf_pos = 0;
+
+    /* Wait for child to complete and read all output */
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+        if (w->buf_pos + n >= w->buf_len - 1) {
+            w->buf_len = (w->buf_len + n) * 2;
+            w->buffer = g_realloc(w->buffer, w->buf_len);
+        }
+        memcpy(w->buffer + w->buf_pos, buf, n);
+        w->buf_pos += n;
+        w->buffer[w->buf_pos] = '\0';
+    }
+    close(pipefd[0]);
+    w->out_pipe = -1;
+
+    /* Wait for child to finish */
+    int status;
+    if (w->child_pid > 0) {
+        waitpid(w->child_pid, &status, 0);
+        w->child_pid = 0;
+    }
 }
 
 static void mpcsh_read_window_output(MpcshWindow *w)
@@ -994,15 +1036,6 @@ static void mpcsh_read_window_output(MpcshWindow *w)
     }
 }
 
-static gboolean mpcsh_window_timer_cb(gpointer data)
-{
-    (void)data;
-    for (int i = 0; i < mpcsh_window_count; ++i) {
-        mpcsh_read_window_output(&mpcsh_windows[i]);
-    }
-    return G_SOURCE_CONTINUE;
-}
-
 static int mpcsh_window_loop(int initial_window)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
@@ -1024,11 +1057,6 @@ static int mpcsh_window_loop(int initial_window)
 
     /* Set up mouse reporting */
     printf("\033[?1000h\033[?1006h");
-
-    /* Set up periodic timer for reading child output */
-    GSource *timer = g_timeout_source_new(100);
-    g_source_set_callback(timer, mpcsh_window_timer_cb, NULL, NULL);
-    g_source_attach(NULL, g_main_context_default());
 
     int result = 0;
 
@@ -1112,9 +1140,6 @@ static int mpcsh_window_loop(int initial_window)
 
     printf("\033[?1000l\033[?1006l\033[0m");
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-
-    g_source_remove(g_source_get_id(timer));
-    g_source_unref(timer);
 
     /* Clean up remaining windows */
     for (int i = 0; i < mpcsh_window_count; ++i) {
