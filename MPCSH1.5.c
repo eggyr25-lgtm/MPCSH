@@ -782,9 +782,9 @@ static int mpcsh_ls_builtin(char **argv);
 static int mpcsh_wallpaper_builtin(char **argv);
 static int mpcsh_imgcat_builtin(char **argv);
 static int mpcsh_limits_builtin(char **argv);
-static int mpcsh_mpcupdate_builtin(char **argv);
-static int mpcsh_mpcbits_builtin(char **argv);
-static int mpcsh_mpcversion_builtin(char **argv);
+__attribute__((used)) static int mpcsh_mpcupdate_builtin(char **argv);
+__attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv);
+__attribute__((used)) static int mpcsh_mpcversion_builtin(char **argv);
 /* ------------------------------------------------------------
  * Fish-native core builtins
  * ------------------------------------------------------------ */
@@ -1258,7 +1258,7 @@ static void mpcupdate_download_and_install(const MpcshRelease *release, const ch
     }
 }
 
-static int mpcsh_mpcupdate_builtin(char **argv) {
+__attribute__((used)) static int mpcsh_mpcupdate_builtin(char **argv) {
     if(!argv || !argv[0] || strcmp(argv[0], "mpcupdate") != 0) return -1;
 
     if(argv[1] && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
@@ -1481,7 +1481,7 @@ static void mpcbits_list_snapshots() {
     printf("Total snapshots: %d\n", count);
 }
 
-static int mpcsh_mpcbits_builtin(char **argv) {
+__attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv) {
     if(!argv || !argv[0] || strcmp(argv[0], "mpcbits") != 0) return -1;
 
     if(!argv[1]) {
@@ -1574,7 +1574,7 @@ static int mpcsh_mpcbits_builtin(char **argv) {
  * MPCVERSION — Version info
  * ============================================================================ */
 
-static int mpcsh_mpcversion_builtin(char **argv) {
+__attribute__((used)) static int mpcsh_mpcversion_builtin(char **argv) {
     if(!argv || !argv[0] || strcmp(argv[0], "mpcversion") != 0) return -1;
 
     printf("MarekPC Shell %s (%d.%d.%d)\n",
@@ -1878,7 +1878,6 @@ mpcsh_run_pipeline(char *cmdline)
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
-        int frc = mpc_function_call(argv);
         if (!strcmp(argv[0], "mpcupdate")) {
             int result = mpcsh_mpcupdate_builtin(argv);
             mpcsh_free_argv(argv); g_free(work);
@@ -1894,6 +1893,7 @@ mpcsh_run_pipeline(char *cmdline)
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
+        int frc = mpc_function_call(argv);
         if (frc >= 0) { mpcsh_free_argv(argv); g_free(work); mpcsh_last_status = frc; return frc; }
         int pid = mpcsh_spawn_segment(argv, STDIN_FILENO, STDOUT_FILENO);
         if (pid < 0) { mpcsh_free_argv(argv); g_free(work); mpcsh_last_status = 127; return 127; }
