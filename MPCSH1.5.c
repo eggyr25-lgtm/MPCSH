@@ -817,74 +817,73 @@ static void mpcsh_render_window(const MpcshWindow *w, gboolean focused)
     if (ww < 20) ww = 20;
     if (wh < 5) wh = 5;
 
-    /* Save cursor and hide it during render */
+    /* Hide cursor during render */
     printf("\033[?25l");
 
-    /* Background fill for content area */
-    for (int r = 1; r < wh - 1; r++) {
-        printf("\033[%d;%dH", wy + r, wx + 1);
-        printf("\033[48;5;236m");
-        for (int c = 0; c < ww - 2; c++) printf(" ");
-        printf("\033[0m");
-    }
+    /* Draw window frame using Unicode box-drawing and ANSI colors */
+    const char *bar_bg  = focused ? "\033[48;5;20m"  : "\033[48;5;238m";
+    const char *content_bg = "\033[48;5;235m";
+    const char *title_fg = "\033[38;5;252m";
+    const char *border_fg = "\033[38;5;243m";
 
-    /* Top border with title bar */
-    printf("\033[%d;%dH", wy, wx);
-    const char *bg = focused ? "\033[48;5;20m" : "\033[48;5;238m";
-    const char *fg = "\033[37m";
-    printf("%s%s┌", bg, fg);
+    /* Top border (title bar) */
+    printf("\033[%d;%dH%s%s", wy, wx, bar_bg, title_fg);
+    printf("┌");
 
     /* Title text */
     char title[128];
-    snprintf(title, sizeof(title), " %s [%d] ", w->title, w->id);
-    int title_len = strlen(title);
-    printf("%s", title);
+    int title_len = snprintf(title, sizeof(title), " %s [%d] ", w->title, w->id);
+    if (title_len > ww - 12) title_len = ww - 12;
+    printf("%.*s", title_len, title);
 
-    /* Window control buttons - right aligned */
-    int btn_start = wx + ww - 1;
-    /* Calculate spacing to push buttons to right */
-    int used = 1 + title_len; /* left border + title */
-    int btns_len = 9; /* " ▭ ✕ " or similar */
-    int pad = ww - used - btns_len;
+    /* Window control buttons (right-aligned) */
+    int controls_len = 8; /* e.g. "▭ ✕" */
+    int pad = ww - 2 - title_len - controls_len;
     if (pad < 1) pad = 1;
     for (int p = 0; p < pad; p++) printf(" ");
 
-    /* State button */
-    if (w->state == 2)
-        printf("\033[38;5;226m□\033[0m"); /* maximized: restore */
-    else if (w->state == 1)
-        printf("\033[38;5;11m−\033[0m");   /* minimized */
-    else
-        printf("\033[38;5;10m▭\033[0m");   /* normal: maximize */
+    /* State button (minimize/maximize/restore), then close */
+    const char *state_sym, *state_color;
+    if (w->state == 2) {
+        state_sym = "□";
+        state_color = "\033[38;5;226m";
+    } else if (w->state == 1) {
+        state_sym = "−";
+        state_color = "\033[38;5;11m";
+    } else {
+        state_sym = "▭";
+        state_color = "\033[38;5;10m";
+    }
+    printf("%s%s%s", state_color, state_sym, "\033[0m");
     printf(" ");
-    printf("\033[38;5;196m✕\033[0m");      /* close button */
+    printf("\033[38;5;196m✕\033[0m");
 
-    /* Top-right corner */
-    printf("%s┐\033[0m", bg);
+    printf("┐\033[0m");
 
-    /* Side borders */
+    /* Content rows */
     for (int r = 1; r < wh - 1; r++) {
-        printf("\033[%d;%dH", wy + r, wx);
-        printf("%s│\033[0m", bg);
-        printf("\033[%d;%dH", wy + r, wx + ww - 1);
-        printf("%s│\033[0m", bg);
+        printf("\033[%d;%dH%s%s│%s", wy + r, wx, content_bg, border_fg, "\033[0m");
+        printf("%s ", content_bg);
+        /* Clear row interior */
+        for (int c = 0; c < ww - 3; c++) printf(" ");
+        printf("\033[0m%s│\033[0m", border_fg);
     }
 
-    /* Bottom border */
-    printf("\033[%d;%dH", wy + wh - 1, wx);
-    printf("%s%s└", bg, fg);
-    for (int c = 1; c < ww - 1; c++) printf("─");
-    printf("┘\033[0m");
-
-    /* Window content (first line if output available) */
+    /* Display first line of output inside the window */
     if (w->buffer && w->buf_pos > 0) {
-        printf("\033[%d;%dH", wy + 1, wx + 2);
+        printf("\033[%d;%dH%s", wy + 1, wx + 2, title_fg);
         int avail = ww - 4;
         char *nl = strchr(w->buffer, '\n');
         int to_show = nl ? (int)(nl - w->buffer) : (int)w->buf_pos;
         if (to_show > avail) to_show = avail;
         fwrite(w->buffer, 1, to_show, stdout);
+        printf("\033[0m");
     }
+
+    /* Bottom border */
+    printf("\033[%d;%dH%s%s%s└", wy + wh - 1, wx, bar_bg, border_fg, "");
+    for (int c = 1; c < ww - 1; c++) printf("─");
+    printf("┘\033[0m");
 
     printf("\033[?25h");
     fflush(stdout);
