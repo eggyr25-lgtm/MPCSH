@@ -1660,67 +1660,6 @@ __attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv) {
  * MPCVERSION — Version info
  * ============================================================================ */
 
-__attribute__((used)) static int mpcsh_windowlaunch_builtin(char **argv) {
-    if(!argv || !argv[0] || strcmp(argv[0], "windowlaunch") != 0) return -1;
-
-    /* Parse windowlaunch command */
-    /* windowlaunch --persist <title> <command> */
-    if (strstr(argv[1], "--persist")) {
-        char *title = strtok(argv[2], " ");
-        char *command = strtok(NULL, " ");
-        if (title && command) {
-            printf("Window '%s' launched with command: %s (persist mode)\n", title, command);
-        }
-    }
-    /* windowlaunch --title <title> --command <cmd> --width <w> --height <h> */
-    else if (strstr(argv[1], "--title")) {
-        char *title = strtok(argv[2], " ");
-        char *command = strtok(argv[4], " ");
-        int width = atoi(strtok(argv[6], " "));
-        int height = atoi(strtok(argv[8], " "));
-        if (title && command && width > 0 && height > 0)
-            return 0; else return -1;
-    }
-
-    return 0;
-}
-
-__attribute__((used)) static int mpcsh_window_terminate_builtin(char **argv) {
-    if(!argv || !argv[0] || strcmp(argv[0], "windowterminate") != 0) return -1;
-
-    int window_id = atoi(argv[1]);
-    printf("Window %d terminated.\n", window_id);
-
-    return 0;
-}
-
-__attribute__((used)) static int mpcsh_window_pick_builtin(char **argv) {
-    if(!argv || !argv[0] || strcmp(argv[0], "windowpick") != 0) return -1;
-
-    printf("Window picker: Select a window by ID.\n");
-    printf("Available windows:\n");
-    printf("1: Terminal (ID: 1)\n");
-    printf("2: Browser (ID: 2)\n");
-    printf("3: Editor (ID: 3)\n");
-
-    printf("Enter window ID to select (0 to cancel): ");
-    int choice;
-    scanf("%d", &choice);
-
-    if (choice > 0 && choice <= 3) {
-        printf("Selected window: %d\n", choice);
-    }
-
-    return 0;
-}
-
-__attribute__((used)) static int mpcsh_window_configure_builtin(char **argv) {
-    if(!argv || !argv[0] || strcmp(argv[0], "windowconfigure") != 0) return -1;
-
-    printf("Window configuration command.\n");
-
-    return 0;
-}
 __attribute__((used)) static int
 mpcsh_mpcversion_builtin(char **argv) {
     if(!argv || !argv[0] || strcmp(argv[0], "mpcversion") != 0)
