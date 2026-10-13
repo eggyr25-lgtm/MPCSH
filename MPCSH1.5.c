@@ -1006,8 +1006,9 @@ static gboolean mpcsh_window_timer_cb(gpointer data)
 static int mpcsh_window_loop(int initial_window)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
-        fprintf(stderr, "mpcsh: windowlaunch: requires a terminal\n");
-        return 2;
+        /* Non-interactive mode: render once and return */
+        mpcsh_render_windows();
+        return 0;
     }
 
     /* Set terminal to raw mode */
