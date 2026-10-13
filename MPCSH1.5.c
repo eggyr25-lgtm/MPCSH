@@ -1801,6 +1801,106 @@ mpcsh_spawn_segment(char **argv, int in_fd, int out_fd)
             fflush(NULL);
             _exit(rc);
         }
+        if (!strcasecmp(exec_argv[0], "ls")) {
+            int rc = mpcsh_ls_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcasecmp(exec_argv[0], "wallpaper")) {
+            int rc = mpcsh_wallpaper_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "set")) {
+            int rc = mpcsh_set_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "limits")) {
+            int rc = mpcsh_limits_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "cd")) {
+            int rc = mpcsh_cd_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "pwd")) {
+            int rc = mpcsh_pwd_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "cwd")) {
+            int rc = mpcsh_pwd_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "status")) {
+            int rc = mpcsh_status_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "mpcimgcat")) {
+            int rc = mpcsh_imgcat_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcasecmp(exec_argv[0], "portmap")) {
+            int rc = mpcsh_portmap_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcasecmp(exec_argv[0], "guiinterm")) {
+            int rc = mpcsh_guiinterm_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "ctk")) {
+            int rc = mpcsh_ctk_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "windowlaunch")) {
+            int rc = mpcsh_windowlaunch_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "windowterminate")) {
+            int rc = mpcsh_window_terminate_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "windowpick")) {
+            int rc = mpcsh_window_pick_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "windowconfigure")) {
+            int rc = mpcsh_window_configure_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "addshortcut")) {
+            int rc = mpcsh_add_shortcut_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "mpcupdate")) {
+            int rc = mpcsh_mpcupdate_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "mpcbits")) {
+            int rc = mpcsh_mpcbits_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
+        if (!strcmp(exec_argv[0], "mpcversion")) {
+            int rc = mpcsh_mpcversion_builtin(exec_argv);
+            fflush(NULL);
+            _exit(rc);
+        }
 
         int frc = mpc_function_call(exec_argv);
         if (frc >= 0) { fflush(NULL); _exit(frc); }
