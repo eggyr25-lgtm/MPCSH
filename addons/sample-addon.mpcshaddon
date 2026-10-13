@@ -1,0 +1,22 @@
+{
+  "name": "sample-addon",
+  "version": "1.0.0",
+  "description": "Sample addon for MPCSH 1.6 demonstration",
+  "author": "MarekPC",
+  "commands": [
+    {
+      "name": "sample",
+      "description": "Sample addon command",
+      "action": "echo \"Sample addon command executed!\""
+    }
+  ],
+  "windows": [
+    {
+      "title": "Sample Window",
+      "command": "echo \"This is a sample window\"",
+      "width": 400,
+      "height": 200,
+      "accent_color": "#FF00FF"
+    }
+  ]
+}
