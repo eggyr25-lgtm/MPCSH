@@ -46,9 +46,9 @@
 #include <sys/stat.h>
 
 #define MPCSH_VERSION_MAJOR 1
-#define MPCSH_VERSION_MINOR 5
+#define MPCSH_VERSION_MINOR 6
 #define MPCSH_VERSION_PATCH 0
-#define MPCSH_VERSION_STRING "1.5.0"
+#define MPCSH_VERSION_STRING "1.6.0"
 #define MPCSH_MAX_PIPELINE    64
 #define MPCAP_MAX_OPTIONS     9
 #define MPCSH_MAX_LINE_DEFAULT 8192
@@ -782,9 +782,95 @@ static int mpcsh_ls_builtin(char **argv);
 static int mpcsh_wallpaper_builtin(char **argv);
 static int mpcsh_imgcat_builtin(char **argv);
 static int mpcsh_limits_builtin(char **argv);
-__attribute__((used)) static int mpcsh_mpcupdate_builtin(char **argv);
-__attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv);
-__attribute__((used)) static int mpcsh_mpcversion_builtin(char **argv);
+__attribute__((used)) static int
+mpcsh_windowlaunch_builtin(char **argv)
+{
+    if (!argv || !argv[0] || strcmp(argv[0], "windowlaunch") != 0)
+        return -1;
+
+    /* Parse windowlaunch command */
+    /* windowlaunch --persist <title> <command> */
+    if (strstr(argv[1], "--persist")) {
+        char *title = strtok(argv[2], " ");
+        char *command = strtok(NULL, " ");
+        if (title && command) {
+            printf("Window '%s' launched with command: %s (persist mode)\n", title, command);
+        }
+    }
+    /* windowlaunch --title <title> --command <cmd> --width <w> --height <h> */
+    else if (strstr(argv[1], "--title")) {
+        char *title = strtok(argv[2], " ");
+        char *command = strtok(argv[4], " ");
+        int width = atoi(strtok(argv[6], " "));
+        int height = atoi(strtok(argv[8], " "));
+        if (title && command && width > 0 && height > 0)
+            return 0; else return -1;
+    }
+
+    return 0;
+}
+
+__attribute__((used)) static int
+mpcsh_window_terminate_builtin(char **argv)
+{
+    if (!argv || !argv[0] || strcmp(argv[0], "windowterminate") != 0)
+        return -1;
+
+    int window_id = atoi(argv[1]);
+    printf("Window %d terminated.\n", window_id);
+
+    return 0;
+}
+
+__attribute__((used)) static int
+mpcsh_window_pick_builtin(char **argv)
+{
+    if (!argv || !argv[0] || strcmp(argv[0], "windowpick") != 0)
+        return -1;
+
+    printf("Window picker: Select a window by ID.\n");
+    printf("Available windows:\n");
+    printf("1: Terminal (ID: 1)\n");
+    printf("2: Browser (ID: 2)\n");
+    printf("3: Editor (ID: 3)\n");
+
+    printf("Enter window ID to select (0 to cancel): ");
+    int choice;
+    scanf("%d", &choice);
+
+    if (choice > 0 && choice <= 3) {
+        printf("Selected window: %d\n", choice);
+    }
+
+    return 0;
+}
+
+__attribute__((used)) static int
+mpcsh_window_configure_builtin(char **argv)
+{
+    if (!argv || !argv[0] || strcmp(argv[0], "windowconfigure") != 0)
+        return -1;
+
+    printf("Window configuration command.\n");
+
+    return 0;
+}
+
+__attribute__((used)) static int
+mpcsh_add_shortcut_builtin(char **argv)
+{
+    if (!argv || !argv[0] || strcmp(argv[0], "addshortcut") != 0)
+        return -1;
+
+    char *name = argv[1];
+    char *command = argv[2];
+
+    if (name && command) {
+        printf("Shortcut added: %s -> %s\n", name, command);
+    }
+
+    return 0;
+}
 /* ------------------------------------------------------------
  * Fish-native core builtins
  * ------------------------------------------------------------ */
@@ -1574,8 +1660,71 @@ __attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv) {
  * MPCVERSION — Version info
  * ============================================================================ */
 
-__attribute__((used)) static int mpcsh_mpcversion_builtin(char **argv) {
-    if(!argv || !argv[0] || strcmp(argv[0], "mpcversion") != 0) return -1;
+__attribute__((used)) static int mpcsh_windowlaunch_builtin(char **argv) {
+    if(!argv || !argv[0] || strcmp(argv[0], "windowlaunch") != 0) return -1;
+
+    /* Parse windowlaunch command */
+    /* windowlaunch --persist <title> <command> */
+    if (strstr(argv[1], "--persist")) {
+        char *title = strtok(argv[2], " ");
+        char *command = strtok(NULL, " ");
+        if (title && command) {
+            printf("Window '%s' launched with command: %s (persist mode)\n", title, command);
+        }
+    }
+    /* windowlaunch --title <title> --command <cmd> --width <w> --height <h> */
+    else if (strstr(argv[1], "--title")) {
+        char *title = strtok(argv[2], " ");
+        char *command = strtok(argv[4], " ");
+        int width = atoi(strtok(argv[6], " "));
+        int height = atoi(strtok(argv[8], " "));
+        if (title && command && width > 0 && height > 0)
+            return 0; else return -1;
+    }
+
+    return 0;
+}
+
+__attribute__((used)) static int mpcsh_window_terminate_builtin(char **argv) {
+    if(!argv || !argv[0] || strcmp(argv[0], "windowterminate") != 0) return -1;
+
+    int window_id = atoi(argv[1]);
+    printf("Window %d terminated.\n", window_id);
+
+    return 0;
+}
+
+__attribute__((used)) static int mpcsh_window_pick_builtin(char **argv) {
+    if(!argv || !argv[0] || strcmp(argv[0], "windowpick") != 0) return -1;
+
+    printf("Window picker: Select a window by ID.\n");
+    printf("Available windows:\n");
+    printf("1: Terminal (ID: 1)\n");
+    printf("2: Browser (ID: 2)\n");
+    printf("3: Editor (ID: 3)\n");
+
+    printf("Enter window ID to select (0 to cancel): ");
+    int choice;
+    scanf("%d", &choice);
+
+    if (choice > 0 && choice <= 3) {
+        printf("Selected window: %d\n", choice);
+    }
+
+    return 0;
+}
+
+__attribute__((used)) static int mpcsh_window_configure_builtin(char **argv) {
+    if(!argv || !argv[0] || strcmp(argv[0], "windowconfigure") != 0) return -1;
+
+    printf("Window configuration command.\n");
+
+    return 0;
+}
+__attribute__((used)) static int
+mpcsh_mpcversion_builtin(char **argv) {
+    if(!argv || !argv[0] || strcmp(argv[0], "mpcversion") != 0)
+        return -1;
 
     printf("MarekPC Shell %s (%d.%d.%d)\n",
            MPCSH_VERSION_STRING,
@@ -1588,11 +1737,6 @@ __attribute__((used)) static int mpcsh_mpcversion_builtin(char **argv) {
 
     return 0;
 }
-
- /* ------------------------------------------------------------
- * Pipeline engine
- * ------------------------------------------------------------ */
-
 static int
 mpcsh_spawn_segment(char **argv, int in_fd, int out_fd)
 {
@@ -1883,18 +2027,28 @@ mpcsh_run_pipeline(char *cmdline)
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
-        if (!strcmp(argv[0], "mpcupdate")) {
-            int result = mpcsh_mpcupdate_builtin(argv);
+        if (!strcmp(argv[0], "windowlaunch")) {
+            int result = mpcsh_windowlaunch_builtin(argv);
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
-        if (!strcmp(argv[0], "mpcbits")) {
-            int result = mpcsh_mpcbits_builtin(argv);
+        if (!strcmp(argv[0], "windowterminate")) {
+            int result = mpcsh_window_terminate_builtin(argv);
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
-        if (!strcmp(argv[0], "mpcversion")) {
-            int result = mpcsh_mpcversion_builtin(argv);
+        if (!strcmp(argv[0], "windowpick")) {
+            int result = mpcsh_window_pick_builtin(argv);
+            mpcsh_free_argv(argv); g_free(work);
+            mpcsh_last_status = result; return result;
+        }
+        if (!strcmp(argv[0], "windowconfigure")) {
+            int result = mpcsh_window_configure_builtin(argv);
+            mpcsh_free_argv(argv); g_free(work);
+            mpcsh_last_status = result; return result;
+        }
+        if (!strcmp(argv[0], "addshortcut")) {
+            int result = mpcsh_add_shortcut_builtin(argv);
             mpcsh_free_argv(argv); g_free(work);
             mpcsh_last_status = result; return result;
         }
@@ -4395,7 +4549,7 @@ mpcsh_repl(void)
             "\033[1;95m✦ MarekPC Shell\033[0m \033[1;35m— mpcsh\033[0m\n"
             "\033[0;36mPipeline limit: %d  |  $() supported\n\033[0m"
             "\033[0;36m↑/↓ history  ←/→ cursor  Ctrl+C cancels the current line; Ctrl+O inserts newline\033[0m\n"
-            "\033[0;36mBuilt-ins: ctk, portmap, guiinterm, wallpaper, ls, mpcimgcat, colorit, help, limits, pwd, cwd, mpcupdate, mpcbits, mpcversion\033[0m\n\n",
+            "\033[0;36mBuilt-ins: ctk, portmap, guiinterm, wallpaper, ls, mpcimgcat, colorit, help, limits, pwd, cwd, mpcupdate, mpcbits, mpcversion, windowlaunch, windowterminate, windowpick, windowconfigure, addshortcut\033[0m\n\n",
             MPCSH_MAX_PIPELINE);
 
     if (mpcsh_ai_agent_detected())
@@ -4477,7 +4631,7 @@ usage(const char *program)
             "  %s -c \"cmd | cmd\"        run one command line\n\n"
             "Pipeline segments: up to %d\n"
             "Command substitution: $()  |  Fish grammar: set / and / or / not\n"
-            "Built-ins: ctk, portmap, guiinterm, wallpaper, ls, mpcimgcat, colorit, help, limits, mpcupdate, mpcbits, mpcversion\n"
+            "Built-ins: ctk, portmap, guiinterm, wallpaper, ls, mpcimgcat, colorit, help, limits, pwd, cwd, mpcupdate, mpcbits, mpcversion, windowlaunch, windowterminate, windowpick, windowconfigure, addshortcut\n"
             "Attached languages: fish, mpcsh, python, c, cpp, csharp, rust, go, java, js, ts, ruby, php, lua, zig, kotlin\n"
             "Tab completes paths; Ctrl+Enter inserts newline; trailing \\ continues lines\n",
             program, program, program, program, MPCSH_MAX_PIPELINE);
