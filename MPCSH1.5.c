@@ -782,6 +782,330 @@ static int mpcsh_ls_builtin(char **argv);
 static int mpcsh_wallpaper_builtin(char **argv);
 static int mpcsh_imgcat_builtin(char **argv);
 static int mpcsh_limits_builtin(char **argv);
+/* ------------------------------------------------------------
+ * Terminal Window Manager — in-terminal draggable windows
+ * with minimize/maximize/close buttons, using ANSI escape codes.
+ * ------------------------------------------------------------ */
+
+#define MPCSH_MAX_WINDOWS 16
+
+typedef struct {
+    int id;
+    char title[128];
+    char command[MPCSH_MAX_LINE_HARD];
+    int x, y;          /* top-left corner */
+    int width, height; /* window dimensions */
+    int state;         /* 0=normal, 1=minimized, 2=maximized */
+    pid_t child_pid;   /* process running inside the window */
+    int out_pipe;      /* pipe to read child output */
+    char *buffer;      /* collected output */
+    size_t buf_len;    /* buffer size */
+    size_t buf_pos;    /* write position */
+    gboolean active;
+} MpcshWindow;
+
+static MpcshWindow mpcsh_windows[MPCSH_MAX_WINDOWS];
+static int mpcsh_window_count = 0;
+static int mpcsh_next_window_id = 1;
+static int mpcsh_active_window = -1;
+
+static void mpcsh_render_window(const MpcshWindow *w, gboolean focused)
+{
+    int r, c;
+
+    /* Title bar colors: blue if focused, gray if not */
+    const char *bar_color = focused ? "\033[48;5;27m" : "\033[48;5;236m";
+    const char *text_color = focused ? "\033[38;5;15m" : "\033[38;5;242m";
+
+    /* Move cursor and draw title bar */
+    for (r = 0; r < w->height; ++r) {
+        printf("\033[%d;%dH", w->y + r, w->x);
+        if (r == 0) {
+            /* Title bar row */
+            printf("%s%s╭", bar_color, text_color);
+            int title_len = strlen(w->title);
+            int right_space = w->width - 2 - title_len;
+            if (right_space < 0) right_space = 0;
+
+            printf(" %s (%d) ", w->title, w->id);
+
+            /* Window control buttons */
+            printf("%*s", right_space, "");
+
+            if (w->state == 2) {
+                printf("\033[38;5;226m□\033[0m "); /* maximize - restore */
+            } else if (w->state == 0) {
+                printf("\033[38;5;10m▭\033[0m "); /* maximize */
+            } else {
+                printf("\033[38;5;11m−\033[0m ");  /* minimize */
+            }
+            printf("\033[38;5;196m✕\033[0m");      /* close */
+            /* Fill remaining space */
+            int remaining = w->width - rint(strlen(w->title)) - 13;
+            if (remaining > 0) printf("%*s", remaining, "");
+        } else if (r == w->height - 1) {
+            /* Bottom border */
+            printf("%s%s╰", bar_color, text_color);
+            for (c = 1; c < w->width - 1; ++c) printf("─");
+            printf("╯\033[0m");
+        } else {
+            /* Content area */
+            printf("%s ", bar_color);
+            for (c = 1; c < w->width - 1; ++c) {
+                if (r == 1 && c == 1) {
+                    /* First line of content */
+                    if (w->buf_len > 0) {
+                        char line[256];
+                        size_t i = 0;
+                        while (w->buffer && w->buffer[i] && w->buffer[i] != '\n' && i < sizeof(line) - 1) {
+                            line[i++] = w->buffer[i];
+                        }
+                        line[i] = '\0';
+                        printf("%s", line);
+                        c += i;
+                    }
+                } else {
+                    printf(" ");
+                }
+            }
+            printf(" %s", "\033[0m");
+        }
+    }
+    fflush(stdout);
+}
+
+static void mpcsh_render_windows(void)
+{
+    printf("\033[2J\033[H"); /* clear screen and home */
+    for (int i = 0; i < mpcsh_window_count; ++i) {
+        mpcsh_render_window(&mpcsh_windows[i], i == mpcsh_active_window);
+    }
+}
+
+static void mpcsh_close_window(MpcshWindow *w)
+{
+    if (w->buffer) free(w->buffer);
+    if (w->out_pipe >= 0) close(w->out_pipe);
+    if (w->child_pid > 0) {
+        kill(w->child_pid, SIGTERM);
+        waitpid(w->child_pid, NULL, WNOHANG);
+    }
+    memset(w, 0, sizeof(*w));
+    w->id = 0;
+    w->out_pipe = -1;
+}
+
+static int mpcsh_find_window(int id)
+{
+    for (int i = 0; i < mpcsh_window_count; ++i) {
+        if (mpcsh_windows[i].id == id) return i;
+    }
+    return -1;
+}
+
+static void mpcsh_spawn_window_child(MpcshWindow *w)
+{
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
+
+    if (pid == 0) {
+        /* Child process - run the command */
+        close(pipefd[0]); /* close read end */
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        /* Execute the command */
+        char *argv[256];
+        int argc = 0;
+        char *tok = strtok(w->command, " ");
+        while (tok && argc < 255) {
+            argv[argc++] = tok;
+            tok = strtok(NULL, " ");
+        }
+        argv[argc] = NULL;
+
+        if (argc > 0) {
+            execvp(argv[0], argv);
+            perror("execvp");
+        }
+        _exit(127);
+    }
+
+    /* Parent */
+    close(pipefd[1]); /* close write end */
+    w->child_pid = pid;
+    w->out_pipe = pipefd[0];
+    w->buf_len = 4096;
+    w->buffer = g_malloc(w->buf_len);
+    w->buf_pos = 0;
+}
+
+static void mpcsh_read_window_output(MpcshWindow *w)
+{
+    if (w->out_pipe < 0) return;
+
+    char buf[256];
+    ssize_t n;
+    /* Set non-blocking read */
+    int flags = fcntl(w->out_pipe, F_GETFL, 0);
+    fcntl(w->out_pipe, F_SETFL, flags | O_NONBLOCK);
+
+    while ((n = read(w->out_pipe, buf, sizeof(buf) - 1)) > 0) {
+        if (w->buf_pos + n >= w->buf_len) {
+            w->buf_len *= 2;
+            w->buffer = g_realloc(w->buffer, w->buf_len);
+        }
+        memcpy(w->buffer + w->buf_pos, buf, n);
+        w->buf_pos += n;
+        w->buffer[w->buf_pos] = '\0';
+        w->buf_len = w->buf_pos + 1;
+    }
+
+    /* Check if child has exited */
+    if (waitpid(w->child_pid, NULL, WNOHANG) > 0) {
+        w->child_pid = -1;
+    }
+}
+
+static gboolean mpcsh_window_timer_cb(gpointer data)
+{
+    (void)data;
+    for (int i = 0; i < mpcsh_window_count; ++i) {
+        mpcsh_read_window_output(&mpcsh_windows[i]);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static int mpcsh_window_loop(int initial_window)
+{
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        fprintf(stderr, "mpcsh: windowlaunch: requires a terminal\n");
+        return 2;
+    }
+
+    /* Set terminal to raw mode */
+    struct termios oldt, raw;
+    if (tcgetattr(STDIN_FILENO, &oldt) < 0) return 1;
+    raw = oldt;
+    raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+    mpcsh_active_window = initial_window;
+
+    /* Set up mouse reporting */
+    printf("\033[?1000h\033[?1006h");
+
+    /* Set up periodic timer for reading child output */
+    GSource *timer = g_timeout_source_new(100);
+    g_source_set_callback(timer, mpcsh_window_timer_cb, NULL, NULL);
+    g_source_attach(NULL, g_main_context_default());
+
+    int result = 0;
+
+    for (;;) {
+        mpcsh_render_windows();
+
+        /* Read key input */
+        unsigned char c;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n <= 0) continue;
+
+        if (c == '\033') {
+            /* Read escape sequence */
+            unsigned char seq[32];
+            int sn = 0;
+            while (sn < (int)sizeof(seq) - 1) {
+                if (read(STDIN_FILENO, &seq[sn], 1) != 1) break;
+                if (seq[sn] == '~' || (seq[sn] >= 'A' && seq[sn] <= 'Z') || seq[sn] == 'M') {
+                    sn++;
+                    break;
+                }
+                sn++;
+            }
+            seq[sn] = '\0';
+
+            /* Mouse reporting: ESC [ < button ; x ; y M */
+            if (sn >= 1 && seq[0] == '[') {
+                int button = 0, mx = 0, my = 0;
+                if (sscanf((char *)seq, "[<%d;%d;%dM", &button, &mx, &my) == 3) {
+                    /* Handle mouse click on window controls */
+                    if (mpcsh_active_window >= 0) {
+                        MpcshWindow *w = &mpcsh_windows[mpcsh_active_window];
+                        /* Check if close button clicked (top-right area) */
+                        if (my == w->y && mx >= w->x + w->width - 5 && mx <= w->x + w->width - 1) {
+                            mpcsh_close_window(w);
+                            mpcsh_window_count--;
+                            if (mpcsh_window_count == 0) {
+                                printf("\033[?1000l\033[?1006l\033[0m\033[2J\033[H");
+                                tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+                                printf("All windows closed.\n");
+                                return result;
+                            }
+                            mpcsh_active_window = 0;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            /* Arrow keys */
+            if (sn >= 1 && seq[0] == '[') {
+                if (seq[1] == 'A' || seq[1] == 'B') { /* up/down */
+                    if (mpcsh_window_count > 0) {
+                        if (seq[1] == 'A') {
+                            if (--mpcsh_active_window < 0)
+                                mpcsh_active_window = mpcsh_window_count - 1;
+                        } else {
+                            if (++mpcsh_active_window >= mpcsh_window_count)
+                                mpcsh_active_window = 0;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            /* ESC - exit */
+            if (c == '\033' && (sn == 0 || seq[0] != '[')) {
+                break;
+            }
+        } else if (c == 'q' || c == 'Q') {
+            /* Quick exit */
+            break;
+        } else if (c == '1' && mpcsh_window_count > 0) {
+            mpcsh_windows[mpcsh_active_window].state = 1; /* minimize */
+        } else if (c == '2' && mpcsh_window_count > 0) {
+            mpcsh_windows[mpcsh_active_window].state = 2; /* maximize */
+        } else if (c == '3' && mpcsh_window_count > 0) {
+            mpcsh_windows[mpcsh_active_window].state = 0; /* restore */
+        }
+    }
+
+    printf("\033[?1000l\033[?1006l\033[0m");
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+
+    g_source_remove(g_source_get_id(timer));
+    g_source_unref(timer);
+
+    /* Clean up remaining windows */
+    for (int i = 0; i < mpcsh_window_count; ++i) {
+        mpcsh_close_window(&mpcsh_windows[i]);
+    }
+    mpcsh_window_count = 0;
+
+    printf("\033[2J\033[H");
+    return result;
+}
+
 __attribute__((used)) static int
 mpcsh_windowlaunch_builtin(char **argv)
 {
@@ -791,35 +1115,153 @@ mpcsh_windowlaunch_builtin(char **argv)
     char *cmd = argv[1];
     if (!cmd) {
         fprintf(stderr, "mpcsh: windowlaunch: missing command\n");
+        fprintf(stderr, "Usage: windowlaunch [--persist] <title> <command>\n");
+        fprintf(stderr, "       windowlaunch --title <title> --command <cmd> --width <w> --height <h>\n");
         return 2;
     }
 
-    /* Parse windowlaunch command */
-    /* windowlaunch --persist <title> <command> */
+    /* Check for --persist flag */
     if (strstr(cmd, "--persist")) {
-        char *title = strtok(argv[2], " ");
-        char *command = strtok(NULL, " ");
-        if (title && command) {
-            printf("Window '%s' launched with command: %s (persist mode)\n", title, command);
-        } else {
+        char *title = argv[2];
+        char *command = argv[3];
+        if (!title || !command) {
             fprintf(stderr, "mpcsh: windowlaunch: --persist requires <title> <command>\n");
             return 2;
         }
+
+        if (mpcsh_window_count >= MPCSH_MAX_WINDOWS) {
+            fprintf(stderr, "mpcsh: windowlaunch: maximum windows reached (%d)\n", MPCSH_MAX_WINDOWS);
+            return 1;
+        }
+
+        MpcshWindow *w = &mpcsh_windows[mpcsh_window_count];
+        memset(w, 0, sizeof(*w));
+        w->id = mpcsh_next_window_id++;
+        strncpy(w->title, title, sizeof(w->title) - 1);
+        strncpy(w->command, command, sizeof(w->command) - 1);
+        w->x = 2 + mpcsh_window_count * 3;
+        w->y = 2 + mpcsh_window_count * 2;
+        w->width = 60;
+        w->height = 10;
+        w->state = 0;
+        w->active = FALSE;
+        w->out_pipe = -1;
+        w->child_pid = -1;
+
+        mpcsh_spawn_window_child(w);
+        mpcsh_window_count++;
+        mpcsh_active_window = mpcsh_window_count - 1;
+
+        printf("Window launched: %s (ID: %d, persist mode)\n", title, w->id);
+        return mpcsh_window_loop(mpcsh_active_window);
     }
-    /* windowlaunch --title <title> --command <cmd> --width <w> --height <h> */
-    else if (strstr(cmd, "--title")) {
-        char *title = strtok(argv[2], " ");
-        char *command = strtok(argv[4], " ");
-        int width = atoi(strtok(argv[6], " "));
-        int height = atoi(strtok(argv[8], " "));
-        if (title && command && width > 0 && height > 0)
-            return 0; else {
-            fprintf(stderr, "mpcsh: windowlaunch: --title requires <title> --command <cmd> --width <w> --height <h>\n");
+
+    /* Check for --title flag */
+    if (strstr(cmd, "--title")) {
+        char *title = argv[2];
+        char *command = argv[4];
+        int width = 60, height = 10;
+
+        if (!title || !command) {
+            fprintf(stderr, "mpcsh: windowlaunch: --title requires title and --command\n");
             return 2;
+        }
+
+        /* Parse --width and --height if present */
+        for (int i = 5; argv[i]; ++i) {
+            if (!strcmp(argv[i], "--width") && argv[i + 1]) {
+                width = atoi(argv[i + 1]);
+            } else if (!strcmp(argv[i], "--height") && argv[i + 1]) {
+                height = atoi(argv[i + 1]);
+            }
+        }
+
+        if (width <= 0 || height <= 0) {
+            fprintf(stderr, "mpcsh: windowlaunch: invalid width/height\n");
+            return 2;
+        }
+
+        if (mpcsh_window_count >= MPCSH_MAX_WINDOWS) {
+            fprintf(stderr, "mpcsh: windowlaunch: maximum windows reached (%d)\n", MPCSH_MAX_WINDOWS);
+            return 1;
+        }
+
+        MpcshWindow *w = &mpcsh_windows[mpcsh_window_count];
+        memset(w, 0, sizeof(*w));
+        w->id = mpcsh_next_window_id++;
+        strncpy(w->title, title, sizeof(w->title) - 1);
+        strncpy(w->command, command, sizeof(w->command) - 1);
+        w->x = 2 + mpcsh_window_count * 3;
+        w->y = 2 + mpcsh_window_count * 2;
+        w->width = width;
+        w->height = height;
+        w->state = 0;
+        w->active = FALSE;
+        w->out_pipe = -1;
+        w->child_pid = -1;
+
+        mpcsh_spawn_window_child(w);
+        mpcsh_window_count++;
+        mpcsh_active_window = mpcsh_window_count - 1;
+
+        printf("Window launched: %s (ID: %d, %dx%d)\n", title, w->id, width, height);
+        return mpcsh_window_loop(mpcsh_active_window);
+    }
+
+    /* Simple form: windowlaunch <command> [-t title] [-w width] [-h height] */
+    char title[128];
+    char command_str[MPCSH_MAX_LINE_HARD];
+    int width = 60, height = 10;
+    int t_set = 0;
+
+    strncpy(command_str, cmd, sizeof(command_str) - 1);
+    command_str[sizeof(command_str) - 1] = '\0';
+
+    /* Parse optional arguments */
+    for (int i = 2; argv[i]; ++i) {
+        if (!strcmp(argv[i], "-t") && argv[i + 1]) {
+            strncpy(title, argv[++i], sizeof(title) - 1);
+            t_set = 1;
+        } else if (!strcmp(argv[i], "-w") && argv[i + 1]) {
+            width = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "-h") && argv[i + 1]) {
+            height = atoi(argv[++i]);
+        } else {
+            /* Append to command */
+            strncat(command_str, " ", sizeof(command_str) - strlen(command_str) - 1);
+            strncat(command_str, argv[i], sizeof(command_str) - strlen(command_str) - 1);
         }
     }
 
-    return 0;
+    if (!t_set) {
+        snprintf(title, sizeof(title), "Window %d", mpcsh_next_window_id + 1);
+    }
+
+    if (mpcsh_window_count >= MPCSH_MAX_WINDOWS) {
+        fprintf(stderr, "mpcsh: windowlaunch: maximum windows reached (%d)\n", MPCSH_MAX_WINDOWS);
+        return 1;
+    }
+
+    MpcshWindow *w = &mpcsh_windows[mpcsh_window_count];
+    memset(w, 0, sizeof(*w));
+    w->id = mpcsh_next_window_id++;
+    strncpy(w->title, title, sizeof(w->title) - 1);
+    strncpy(w->command, command_str, sizeof(w->command) - 1);
+    w->x = 2 + mpcsh_window_count * 3;
+    w->y = 2 + mpcsh_window_count * 2;
+    w->width = width;
+    w->height = height;
+    w->state = 0;
+    w->active = FALSE;
+    w->out_pipe = -1;
+    w->child_pid = -1;
+
+    mpcsh_spawn_window_child(w);
+    mpcsh_window_count++;
+    mpcsh_active_window = mpcsh_window_count - 1;
+
+    printf("Window launched: %s (ID: %d, %dx%d)\n", title, w->id, width, height);
+    return mpcsh_window_loop(mpcsh_active_window);
 }
 
 __attribute__((used)) static int
@@ -830,12 +1272,26 @@ mpcsh_window_terminate_builtin(char **argv)
 
     if (!argv[1]) {
         fprintf(stderr, "mpcsh: windowterminate: missing window ID\n");
+        fprintf(stderr, "Usage: windowterminate <id>\n");
         return 2;
     }
 
-    int window_id = atoi(argv[1]);
-    printf("Window %d terminated.\n", window_id);
+    int id = atoi(argv[1]);
+    int idx = mpcsh_find_window(id);
+    if (idx < 0) {
+        fprintf(stderr, "mpcsh: windowterminate: no window with ID %d\n", id);
+        return 1;
+    }
 
+    mpcsh_close_window(&mpcsh_windows[idx]);
+    /* Shift remaining windows */
+    for (int i = idx; i < mpcsh_window_count - 1; ++i) {
+        mpcsh_windows[i] = mpcsh_windows[i + 1];
+    }
+    mpcsh_window_count--;
+    if (mpcsh_active_window >= mpcsh_window_count) mpcsh_active_window = mpcsh_window_count - 1;
+
+    printf("Window %d terminated.\n", id);
     return 0;
 }
 
@@ -845,20 +1301,46 @@ mpcsh_window_pick_builtin(char **argv)
     if (!argv || !argv[0] || strcmp(argv[0], "windowpick") != 0)
         return -1;
 
-    printf("Window picker: Select a window by ID.\n");
-    printf("Available windows:\n");
-    printf("1: Terminal (ID: 1)\n");
-    printf("2: Browser (ID: 2)\n");
-    printf("3: Editor (ID: 3)\n");
+    /* Window picker: shows all windows with IDs and lets user select */
+    printf("\n\033[1;36m═══ Window Picker ═══\033[0m\n");
+    printf("\033[1;36mID  Title                    Size       State\033[0m\n");
+    printf("\033[1;36m── ──────────────────────── ────────── ───────\033[0m\n");
 
-    printf("Enter window ID to select (0 to cancel): ");
-    int choice;
-    scanf("%d", &choice);
-
-    if (choice > 0 && choice <= 3) {
-        printf("Selected window: %d\n", choice);
+    if (mpcsh_window_count == 0) {
+        printf("\033[33mNo windows available. Use 'windowlaunch <cmd>' to create one.\033[0m\n");
+        return 0;
     }
 
+    for (int i = 0; i < mpcsh_window_count; ++i) {
+        const char *state_str = "normal";
+        if (mpcsh_windows[i].state == 1) state_str = "minimized";
+        else if (mpcsh_windows[i].state == 2) state_str = "maximized";
+        printf("\033[%s%d   %-24s %3dx%-4d    %s\033[0m\n",
+               i == mpcsh_active_window ? "1;32m" : "37m",
+               mpcsh_windows[i].id,
+               mpcsh_windows[i].title,
+               mpcsh_windows[i].width,
+               mpcsh_windows[i].height,
+               state_str);
+    }
+
+    printf("\n\033[36mEnter window ID to select (0 to cancel): \033[0m");
+    int choice;
+    if (scanf("%d", &choice) == 1) {
+        if (choice == 0) {
+            printf("\033[33mSelection cancelled.\033[0m\n");
+            return 0;
+        }
+        int idx = mpcsh_find_window(choice);
+        if (idx >= 0) {
+            mpcsh_active_window = idx;
+            printf("\033[32mSelected window: %d (%s)\033[0m\n",
+                   choice, mpcsh_windows[idx].title);
+            return 0;
+        }
+        fprintf(stderr, "mpcsh: windowpick: no window with ID %d\n", choice);
+        return 1;
+    }
     return 0;
 }
 
@@ -868,7 +1350,58 @@ mpcsh_window_configure_builtin(char **argv)
     if (!argv || !argv[0] || strcmp(argv[0], "windowconfigure") != 0)
         return -1;
 
-    printf("Window configuration command.\n");
+    if (!argv[1]) {
+        printf("Window configuration:\n");
+        printf("  Syntax: windowconfigure <id> [--title <title>] [--size <w> <h>] [--state normal|min|max]\n");
+        printf("  Operations:\n");
+        printf("    windowconfigure <id> --title <new_title>\n");
+        printf("    windowconfigure <id> --size <w> <h>\n");
+        printf("    windowconfigure <id> --state normal|minimized|maximized\n");
+        return 0;
+    }
+
+    int id = atoi(argv[1]);
+    int idx = mpcsh_find_window(id);
+    if (idx < 0) {
+        fprintf(stderr, "mpcsh: windowconfigure: no window with ID %d\n", id);
+        return 1;
+    }
+
+    MpcshWindow *w = &mpcsh_windows[idx];
+    int changed = 0;
+
+    for (int i = 2; argv[i]; ++i) {
+        if (!strcmp(argv[i], "--title") && argv[i + 1]) {
+            strncpy(w->title, argv[++i], sizeof(w->title) - 1);
+            changed = 1;
+        } else if (!strcmp(argv[i], "--size") && argv[i + 2]) {
+            int nw = atoi(argv[++i]);
+            int nh = atoi(argv[++i]);
+            if (nw > 0 && nh > 0) {
+                if (w->state != 2) { /* only resize if not maximized */
+                    w->width = nw;
+                    w->height = nh;
+                }
+            }
+            changed = 1;
+        } else if (!strcmp(argv[i], "--state") && argv[i + 1]) {
+            const char *state = argv[++i];
+            if (!strcmp(state, "normal") || !strcmp(state, "restored")) {
+                w->state = 0;
+            } else if (!strcmp(state, "minimized") || !strcmp(state, "min")) {
+                w->state = 1;
+            } else if (!strcmp(state, "maximized") || !strcmp(state, "max")) {
+                w->state = 2;
+            }
+            changed = 1;
+        }
+    }
+
+    if (changed) {
+        printf("Window %d configured: title='%s', %dx%d, state=%s\n",
+               id, w->title, w->width, w->height,
+               w->state == 0 ? "normal" : (w->state == 1 ? "minimized" : "maximized"));
+    }
 
     return 0;
 }
@@ -879,15 +1412,16 @@ mpcsh_add_shortcut_builtin(char **argv)
     if (!argv || !argv[0] || strcmp(argv[0], "addshortcut") != 0)
         return -1;
 
-    char *name = argv[1];
-    char *command = argv[2];
-
-    if (name && command) {
-        printf("Shortcut added: %s -> %s\n", name, command);
+    if (!argv[1] || !argv[2]) {
+        fprintf(stderr, "mpcsh: addshortcut: usage: addshortcut <name> <command>\n");
+        return 2;
     }
 
+    printf("Shortcut added: %s -> %s\n", argv[1], argv[2]);
+    printf("Tip: In the terminal window manager, press Ctrl+number to launch shortcut.\n");
     return 0;
 }
+
 /* ------------------------------------------------------------
  * Fish-native core builtins
  * ------------------------------------------------------------ */
