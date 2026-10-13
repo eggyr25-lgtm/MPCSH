@@ -811,66 +811,82 @@ static int mpcsh_active_window = -1;
 
 static void mpcsh_render_window(const MpcshWindow *w, gboolean focused)
 {
-    int r, c;
+    int wx = w->x, wy = w->y;
+    int ww = w->width, wh = w->height;
 
-    /* Title bar colors: blue if focused, gray if not */
-    const char *bar_color = focused ? "\033[48;5;27m" : "\033[48;5;236m";
-    const char *text_color = focused ? "\033[38;5;15m" : "\033[38;5;242m";
+    if (ww < 20) ww = 20;
+    if (wh < 5) wh = 5;
 
-    /* Move cursor and draw title bar */
-    for (r = 0; r < w->height; ++r) {
-        printf("\033[%d;%dH", w->y + r, w->x);
-        if (r == 0) {
-            /* Title bar row */
-            printf("%s%s╭", bar_color, text_color);
-            int title_len = strlen(w->title);
-            int right_space = w->width - 2 - title_len;
-            if (right_space < 0) right_space = 0;
+    /* Save cursor and hide it during render */
+    printf("\033[?25l");
 
-            printf(" %s (%d) ", w->title, w->id);
-
-            /* Window control buttons */
-            printf("%*s", right_space, "");
-
-            if (w->state == 2) {
-                printf("\033[38;5;226m□\033[0m "); /* maximize - restore */
-            } else if (w->state == 0) {
-                printf("\033[38;5;10m▭\033[0m "); /* maximize */
-            } else {
-                printf("\033[38;5;11m−\033[0m ");  /* minimize */
-            }
-            printf("\033[38;5;196m✕\033[0m");      /* close */
-            /* Fill remaining space */
-            int remaining = w->width - rint(strlen(w->title)) - 13;
-            if (remaining > 0) printf("%*s", remaining, "");
-        } else if (r == w->height - 1) {
-            /* Bottom border */
-            printf("%s%s╰", bar_color, text_color);
-            for (c = 1; c < w->width - 1; ++c) printf("─");
-            printf("╯\033[0m");
-        } else {
-            /* Content area */
-            printf("%s ", bar_color);
-            for (c = 1; c < w->width - 1; ++c) {
-                if (r == 1 && c == 1) {
-                    /* First line of content */
-                    if (w->buf_len > 0) {
-                        char line[256];
-                        size_t i = 0;
-                        while (w->buffer && w->buffer[i] && w->buffer[i] != '\n' && i < sizeof(line) - 1) {
-                            line[i++] = w->buffer[i];
-                        }
-                        line[i] = '\0';
-                        printf("%s", line);
-                        c += i;
-                    }
-                } else {
-                    printf(" ");
-                }
-            }
-            printf(" %s", "\033[0m");
-        }
+    /* Background fill for content area */
+    for (int r = 1; r < wh - 1; r++) {
+        printf("\033[%d;%dH", wy + r, wx + 1);
+        printf("\033[48;5;236m");
+        for (int c = 0; c < ww - 2; c++) printf(" ");
+        printf("\033[0m");
     }
+
+    /* Top border with title bar */
+    printf("\033[%d;%dH", wy, wx);
+    const char *bg = focused ? "\033[48;5;20m" : "\033[48;5;238m";
+    const char *fg = "\033[37m";
+    printf("%s%s┌", bg, fg);
+
+    /* Title text */
+    char title[128];
+    snprintf(title, sizeof(title), " %s [%d] ", w->title, w->id);
+    int title_len = strlen(title);
+    printf("%s", title);
+
+    /* Window control buttons - right aligned */
+    int btn_start = wx + ww - 1;
+    /* Calculate spacing to push buttons to right */
+    int used = 1 + title_len; /* left border + title */
+    int btns_len = 9; /* " ▭ ✕ " or similar */
+    int pad = ww - used - btns_len;
+    if (pad < 1) pad = 1;
+    for (int p = 0; p < pad; p++) printf(" ");
+
+    /* State button */
+    if (w->state == 2)
+        printf("\033[38;5;226m□\033[0m"); /* maximized: restore */
+    else if (w->state == 1)
+        printf("\033[38;5;11m−\033[0m");   /* minimized */
+    else
+        printf("\033[38;5;10m▭\033[0m");   /* normal: maximize */
+    printf(" ");
+    printf("\033[38;5;196m✕\033[0m");      /* close button */
+
+    /* Top-right corner */
+    printf("%s┐\033[0m", bg);
+
+    /* Side borders */
+    for (int r = 1; r < wh - 1; r++) {
+        printf("\033[%d;%dH", wy + r, wx);
+        printf("%s│\033[0m", bg);
+        printf("\033[%d;%dH", wy + r, wx + ww - 1);
+        printf("%s│\033[0m", bg);
+    }
+
+    /* Bottom border */
+    printf("\033[%d;%dH", wy + wh - 1, wx);
+    printf("%s%s└", bg, fg);
+    for (int c = 1; c < ww - 1; c++) printf("─");
+    printf("┘\033[0m");
+
+    /* Window content (first line if output available) */
+    if (w->buffer && w->buf_pos > 0) {
+        printf("\033[%d;%dH", wy + 1, wx + 2);
+        int avail = ww - 4;
+        char *nl = strchr(w->buffer, '\n');
+        int to_show = nl ? (int)(nl - w->buffer) : (int)w->buf_pos;
+        if (to_show > avail) to_show = avail;
+        fwrite(w->buffer, 1, to_show, stdout);
+    }
+
+    printf("\033[?25h");
     fflush(stdout);
 }
 
@@ -878,17 +894,21 @@ static void mpcsh_render_windows(void)
 {
     printf("\033[2J\033[H"); /* clear screen and home */
     for (int i = 0; i < mpcsh_window_count; ++i) {
-        mpcsh_render_window(&mpcsh_windows[i], i == mpcsh_active_window);
+        if (mpcsh_windows[i].state != 1) { /* skip minimized windows */
+            mpcsh_render_window(&mpcsh_windows[i], i == mpcsh_active_window);
+        }
     }
+    fflush(stdout);
 }
 
 static void mpcsh_close_window(MpcshWindow *w)
 {
-    if (w->buffer) free(w->buffer);
-    if (w->out_pipe >= 0) close(w->out_pipe);
+    if (w->buffer) { free(w->buffer); w->buffer = NULL; }
+    if (w->out_pipe >= 0) { close(w->out_pipe); w->out_pipe = -1; }
     if (w->child_pid > 0) {
         kill(w->child_pid, SIGTERM);
         waitpid(w->child_pid, NULL, WNOHANG);
+        w->child_pid = 0;
     }
     memset(w, 0, sizeof(*w));
     w->id = 0;
