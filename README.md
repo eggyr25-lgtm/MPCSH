@@ -1,3 +1,7 @@
+## Purplecode in action
+
+![Purplecode demo](assets/photography.gif)
+
 # MPCSH — MarekPC Shell 1.7
 
 Open-source shell + terminal console for MarekPC (Polska 2026).
