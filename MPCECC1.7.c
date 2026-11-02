@@ -197,6 +197,19 @@ static MpcEccWlid *mpcecc_wlid_for_picture(GtkWidget *picture)
     return NULL;
 }
 
+/* The XTest connection talks to this window's private Xvfb, which we SIGTERM
+ * when the window closes. XCloseDisplay()/XFlush() on a dead server triggers
+ * Xlib's fatal I/O error handler, which calls exit() and takes ALL of MPCECC
+ * down. So never touch the Display again: close its socket and leak the small
+ * Display struct instead. */
+static void mpcecc_wlid_drop_input(MpcEccWlid *w)
+{
+    if (!w || !w->input_display) return;
+    int fd = ConnectionNumber(w->input_display);
+    w->input_display = NULL;
+    if (fd >= 0) close(fd);
+}
+
 static void mpcecc_wlid_free(MpcEccWlid *w)
 {
     if (!w) return;
@@ -205,7 +218,7 @@ static void mpcecc_wlid_free(MpcEccWlid *w)
     g_free(w->display);
     g_free(w->frame_path);
     if (w->motion_id) g_source_remove(w->motion_id);
-    if (w->input_display) XCloseDisplay(w->input_display);
+    mpcecc_wlid_drop_input(w);
     g_free(w);
 }
 
@@ -223,6 +236,8 @@ static void mpcecc_pixel_win_apply_state(GtkWidget *frame);
 static void mpcecc_pixel_drag_begin(GtkGestureDrag *g, double x, double y, gpointer u);
 static void mpcecc_pixel_drag_update(GtkGestureDrag *g, double ox, double oy, gpointer u);
 static void mpcecc_wlid_focus(MpcEccWlid *win);
+static gboolean mpcecc_global_key(GtkEventControllerKey *controller, guint keyval, guint keycode,
+                                  GdkModifierType state, gpointer user_data);
 
 static char *
 mpcecc_profile_path(void)
@@ -2829,6 +2844,9 @@ mpcecc_hide_pixels_clicked(GtkButton *button, gpointer user_data)
         int id = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(frame), "mpcecc-wlid"));
         MpcEccWlid *win = mpcecc_wlid_find(id);
         if (win) {
+            win->terminating = TRUE;
+            if (win->motion_id) { g_source_remove(win->motion_id); win->motion_id = 0; }
+            mpcecc_wlid_drop_input(win);
             if (win->capture_id) { g_source_remove(win->capture_id); win->capture_id = 0; }
             if (win->app_pid) kill((pid_t)win->app_pid, SIGTERM);
             if (win->xvfb_pid) kill((pid_t)win->xvfb_pid, SIGTERM);
@@ -3121,11 +3139,13 @@ static void mpcecc_wlid_child_exited(GPid pid, gint status, gpointer data)
     if (!win) return;
     if (is_xvfb) {
         if (win->xvfb_pid == pid) win->xvfb_pid = 0;
+        mpcecc_wlid_drop_input(win);
         return;
     }
     if (win->app_pid != pid) return;
     win->app_pid = 0;
     if (win->capture_id) { g_source_remove(win->capture_id); win->capture_id = 0; }
+    mpcecc_wlid_drop_input(win);
     if (win->xvfb_pid) { kill((pid_t)win->xvfb_pid, SIGTERM); win->xvfb_pid = 0; }
     if (win->frame) gtk_widget_set_visible(win->frame, FALSE);
     if (win->frame_path) unlink(win->frame_path);
@@ -3178,7 +3198,7 @@ static gboolean mpcecc_wlid_map_pointer(MpcEccWlid *win, GtkWidget *pic,
 
 static void mpcecc_wlid_send_motion(MpcEccWlid *win, int x, int y)
 {
-    if (!win || !win->input_display || !mpcecc_xtest_load()) return;
+    if (!win || win->terminating || !win->input_display || !mpcecc_xtest_load()) return;
     mpcecc_xtest_motion(win->input_display, 0, x, y, 0);
     XFlush(win->input_display);
 }
