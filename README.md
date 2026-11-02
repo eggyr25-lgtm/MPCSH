@@ -1,4 +1,4 @@
-## Purplecode in action
+## MPCSH in action
 
 ![Purplecode demo](assets/photography.gif)
 
