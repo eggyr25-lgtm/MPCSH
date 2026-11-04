@@ -34,7 +34,7 @@
  *           build / reload / path.
  *   d. DOCS mpcshman gained the "scripting" and "chihuahuas" pages.
  *
- *  1.8.1:
+ *  1.8:
  *   a. NEW  `time COMMAND`  - real / user / sys report.
  *   b. NEW  `mpcshman`      - multi-page manual with pager and search.
  *   c. FIX  mpcimgcat used fmin() without <math.h>; build lines now
@@ -43,7 +43,7 @@
  *           dark checkerboard.
  *   e. FIX  windowlaunch quotes every argument and uses write-all.
  *   f. FIX  windowlaunch / mpcimgcat send $MPCECC_TAB so the result opens
- *           in the tab that issued the command (needs MPCECC 1.8.1).
+ *           in the tab that issued the command (needs MPCECC 1.8).
  * ============================================================
  */
 
@@ -78,8 +78,8 @@
 #include <math.h>
 
 #define MPCSH_VERSION_MAJOR 1
-#define MPCSH_VERSION_MINOR 9
-#define MPCSH_VERSION_PATCH 0
+#define MPCSH_VERSION_MINOR 8
+#define MPCSH_VERSION_PATCH 1
 #define MPCSH_VERSION_STRING "1.8"
 #define MPCSH_MAX_PIPELINE    64
 #define MPCAP_MAX_OPTIONS     9
@@ -1667,123 +1667,218 @@ __attribute__((used)) static int mpcsh_mpcupdate_builtin(char **argv) {
  * MPCBITS — Back-In-Time snapshots
  * ============================================================================ */
 
-static void mpcbits_create_snapshot(const char *description) {
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
+/* Snapshot helpers use GIO/POSIX operations only: never interpolate paths
+ * into a shell command.  Symlinks are copied as links only when explicitly
+ * encountered as entries; recursive traversal never follows them. */
+static gboolean mpcbits_copy_tree(GFile *src, GFile *dst, GError **error)
+{
+    GFileInfo *info = g_file_query_info(src,
+        G_FILE_ATTRIBUTE_STANDARD_TYPE "," G_FILE_ATTRIBUTE_STANDARD_NAME,
+        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, error);
+    if (!info) return FALSE;
+    GFileType type = g_file_info_get_file_type(info);
+    g_object_unref(info);
 
-    char snapshot_dir[MPCSH_MAX_PATH];
-    const char *home = g_get_home_dir();
-    snprintf(snapshot_dir, sizeof(snapshot_dir), "%s/.local/share/mpcsh/snapshots/%s",
-             home ? home : "/tmp", timestamp);
-
-    if(mkdir(snapshot_dir, 0755) != 0 && errno != EEXIST) {
-        fprintf(stderr, "❌ Cannot create snapshot directory\n");
-        return;
+    if (type == G_FILE_TYPE_DIRECTORY) {
+        if (!g_file_make_directory(dst, NULL, error) &&
+            !g_error_matches(*error, G_IO_ERROR, G_IO_ERROR_EXISTS))
+            return FALSE;
+        g_clear_error(error);
+        GFileEnumerator *en = g_file_enumerate_children(src,
+            G_FILE_ATTRIBUTE_STANDARD_NAME "," G_FILE_ATTRIBUTE_STANDARD_TYPE,
+            G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, error);
+        if (!en) return FALSE;
+        gboolean ok = TRUE;
+        GFileInfo *child_info;
+        while (ok && (child_info = g_file_enumerator_next_file(en, NULL, error))) {
+            const char *name = g_file_info_get_name(child_info);
+            GFile *a = g_file_get_child(src, name);
+            GFile *b = g_file_get_child(dst, name);
+            ok = mpcbits_copy_tree(a, b, error);
+            g_object_unref(a); g_object_unref(b); g_object_unref(child_info);
+        }
+        if (error && *error) ok = FALSE;
+        g_object_unref(en);
+        return ok;
     }
-
-    char exe_path[MPCSH_MAX_PATH];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if(len > 0) {
-        exe_path[len] = '\0';
-        char cmd[MPCSH_MAX_PATH * 2 + 256];
-        snprintf(cmd, sizeof(cmd), "cp '%s' '%s/mpcsh' 2>/dev/null", exe_path, snapshot_dir);
-        system(cmd);
-    }
-
-    char config_cmd[MPCSH_MAX_PATH * 2];
-    snprintf(config_cmd, sizeof(config_cmd),
-             "mkdir -p '%s/config' && cp -r ~/.config/mpcsh/* '%s/config/' 2>/dev/null || true",
-             snapshot_dir, snapshot_dir);
-    system(config_cmd);
-
-    char meta_path[MPCSH_MAX_PATH];
-    snprintf(meta_path, sizeof(meta_path), "%s/metadata.json", snapshot_dir);
-    FILE *meta = fopen(meta_path, "w");
-    if(meta) {
-        fprintf(meta, "{\n");
-        fprintf(meta, "  \"timestamp\": \"%s\",\n", timestamp);
-        fprintf(meta, "  \"description\": \"%s\",\n", description ? description : "Manual backup");
-        fprintf(meta, "  \"version\": \"%s\",\n", MPCSH_VERSION_STRING);
-        fprintf(meta, "  \"created\": \"%s\"", asctime(tm_info));
-        fprintf(meta, "}\n");
-        fclose(meta);
-    }
-
-    printf("💾 Snapshot created: %s (%s)\n", timestamp, description ? description : "Manual backup");
+    if (type == G_FILE_TYPE_REGULAR)
+        return g_file_copy(src, dst, G_FILE_COPY_NONE, NULL, NULL, NULL, error);
+    /* Do not copy sockets, devices, FIFOs, or symlinks into a backup. */
+    return TRUE;
 }
 
-static void mpcbits_list_snapshots() {
-    const char *home = g_get_home_dir();
-    char snapshot_base[MPCSH_MAX_PATH];
-    snprintf(snapshot_base, sizeof(snapshot_base), "%s/.local/share/mpcsh/snapshots/",
-             home ? home : "/tmp");
+static gboolean mpcbits_remove_tree(GFile *file, GError **error)
+{
+    GFileInfo *info = g_file_query_info(file,
+        G_FILE_ATTRIBUTE_STANDARD_TYPE, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+        NULL, NULL);
+    if (info && g_file_info_get_file_type(info) == G_FILE_TYPE_DIRECTORY) {
+        GFileEnumerator *en = g_file_enumerate_children(file,
+            G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+            NULL, error);
+        g_object_unref(info);
+        if (!en) return FALSE;
+        gboolean ok = TRUE;
+        GFileInfo *child;
+        while (ok && (child = g_file_enumerator_next_file(en, NULL, error))) {
+            GFile *sub = g_file_get_child(file, g_file_info_get_name(child));
+            ok = mpcbits_remove_tree(sub, error);
+            g_object_unref(sub); g_object_unref(child);
+        }
+        if (error && *error) ok = FALSE;
+        g_object_unref(en);
+        if (!ok) return FALSE;
+    } else if (info) {
+        g_object_unref(info);
+    }
+    return g_file_delete(file, NULL, error);
+}
 
-    DIR *d = opendir(snapshot_base);
-    if(!d) {
-        printf("No snapshots found.\n");
-        printf("💡 Create one with: mpcbits save \"My backup\"\n");
+static guint64 mpcbits_tree_size(GFile *file)
+{
+    GFileInfo *info = g_file_query_info(file,
+        G_FILE_ATTRIBUTE_STANDARD_TYPE "," G_FILE_ATTRIBUTE_STANDARD_SIZE,
+        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+    if (!info) return 0;
+    GFileType type = g_file_info_get_file_type(info);
+    guint64 size = type == G_FILE_TYPE_REGULAR ? g_file_info_get_size(info) : 0;
+    g_object_unref(info);
+    if (type != G_FILE_TYPE_DIRECTORY) return size;
+    GFileEnumerator *en = g_file_enumerate_children(file,
+        G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+        NULL, NULL);
+    if (!en) return 0;
+    GFileInfo *child;
+    while ((child = g_file_enumerator_next_file(en, NULL, NULL))) {
+        GFile *sub = g_file_get_child(file, g_file_info_get_name(child));
+        size += mpcbits_tree_size(sub);
+        g_object_unref(sub); g_object_unref(child);
+    }
+    g_object_unref(en);
+    return size;
+}
+
+static gboolean mpcbits_valid_timestamp(const char *s)
+{
+    if (!s || strlen(s) != 15 || s[8] != '_') return FALSE;
+    for (int i = 0; i < 15; ++i)
+        if (i != 8 && !g_ascii_isdigit(s[i])) return FALSE;
+    return TRUE;
+}
+
+static char *mpcbits_snapshot_base(void)
+{
+    return g_build_filename(g_get_home_dir(), ".local", "share", "mpcsh",
+                            "snapshots", NULL);
+}
+
+static void mpcbits_create_snapshot(const char *description) {
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &tm_info);
+
+    char *base = mpcbits_snapshot_base();
+    char *snapshot_dir = g_build_filename(base, timestamp, NULL);
+    if (!g_mkdir_with_parents(base, 0755) ||
+        g_mkdir(snapshot_dir, 0755) != 0) {
+        fprintf(stderr, "Cannot create snapshot directory: %s\\n", strerror(errno));
+        g_free(base); g_free(snapshot_dir); return;
+    }
+
+    GError *error = NULL;
+    char exe_path[MPCSH_MAX_PATH];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\\0';
+        GFile *src = g_file_new_for_path(exe_path);
+        char *dest_path = g_build_filename(snapshot_dir, "mpcsh", NULL);
+        GFile *dst = g_file_new_for_path(dest_path);
+        if (!g_file_copy(src, dst, G_FILE_COPY_NONE, NULL, NULL, NULL, &error)) {
+            fprintf(stderr, "Snapshot binary copy failed: %s\\n", error->message);
+            g_clear_error(&error);
+        }
+        g_object_unref(src); g_object_unref(dst); g_free(dest_path);
+    }
+
+    char *config_src_path = g_build_filename(g_get_home_dir(), ".config", "mpcsh", NULL);
+    char *config_dst_path = g_build_filename(snapshot_dir, "config", NULL);
+    GFile *config_src = g_file_new_for_path(config_src_path);
+    GFile *config_dst = g_file_new_for_path(config_dst_path);
+    if (g_file_query_exists(config_src, NULL) &&
+        !mpcbits_copy_tree(config_src, config_dst, &error)) {
+        fprintf(stderr, "Snapshot config copy failed: %s\\n",
+                error ? error->message : "unknown error");
+        g_clear_error(&error);
+    }
+    g_object_unref(config_src); g_object_unref(config_dst);
+    g_free(config_src_path); g_free(config_dst_path);
+
+    char *meta_path = g_build_filename(snapshot_dir, "metadata.json", NULL);
+    char *escaped_desc = g_strescape(description ? description : "Manual backup", NULL);
+    char *created = g_strdup(asctime(&tm_info));
+    if (created) g_strchomp(created);
+    char *escaped_created = g_strescape(created ? created : "", NULL);
+    char *meta = g_strdup_printf(
+        "{\\n  \\"timestamp\\": \\"%s\\",\\n  \\"description\\": \\"%s\\",\\n"
+        "  \\"version\\": \\"%s\\",\\n  \\"created\\": \\"%s\\"\\n}\\n",
+        timestamp, escaped_desc, MPCSH_VERSION_STRING, escaped_created);
+    if (!g_file_set_contents(meta_path, meta, -1, &error)) {
+        fprintf(stderr, "Snapshot metadata write failed: %s\\n", error->message);
+        g_clear_error(&error);
+    }
+    g_free(meta); g_free(escaped_desc); g_free(created); g_free(escaped_created);
+    g_free(meta_path);
+    printf("Snapshot created: %s (%s)\\n", timestamp,
+           description ? description : "Manual backup");
+    g_free(base); g_free(snapshot_dir);
+}
+
+static void mpcbits_list_snapshots(void) {
+    char *base = mpcbits_snapshot_base();
+    GDir *d = g_dir_open(base, 0, NULL);
+    if (!d) {
+        printf("No snapshots found.\\n");
+        g_free(base);
         return;
     }
-
-    printf("=== MPCSH BACKUP SNAPSHOTS ===\n");
-    printf("Timestamp          Size     Description\n");
-    printf("----------------------------------------\n");
-
-    struct dirent *entry;
+    printf("=== MPCSH BACKUP SNAPSHOTS ===\\n");
+    printf("Timestamp          Size     Description\\n");
+    printf("----------------------------------------\\n");
+    const char *name;
     int count = 0;
-    while((entry = readdir(d))) {
-        if(entry->d_name[0] == '.') continue;
-
-        char full_path[MPCSH_MAX_PATH];
-        snprintf(full_path, sizeof(full_path), "%s/%s", snapshot_base, entry->d_name);
-
-        struct stat st;
-        if(stat(full_path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-
-        char meta_path[MPCSH_MAX_PATH];
-        snprintf(meta_path, sizeof(meta_path), "%s/metadata.json", full_path);
-        char desc[256] = "Manual backup";
-        char size_str[32] = "0B";
-
-        FILE *meta = fopen(meta_path, "r");
-        if(meta) {
-            char line[1024];
-            while(fgets(line, sizeof(line), meta)) {
-                if(strstr(line, "\"description\"")) {
-                    char *start = strchr(line, ':');
-                    if(start) {
-                        start += 2;
-                        char *end = strchr(start, '"');
-                        if(end) {
-                            int dlen = end - start;
-                            if(dlen > 255) dlen = 255;
-                            strncpy(desc, start, dlen);
-                            desc[dlen] = '\0';
-                        }
-                    }
-                }
-            }
-            fclose(meta);
+    while ((name = g_dir_read_name(d))) {
+        if (!mpcbits_valid_timestamp(name)) continue;
+        char *dir_path = g_build_filename(base, name, NULL);
+        GFile *dir = g_file_new_for_path(dir_path);
+        GFileInfo *info = g_file_query_info(dir, G_FILE_ATTRIBUTE_STANDARD_TYPE,
+            G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+        if (!info || g_file_info_get_file_type(info) != G_FILE_TYPE_DIRECTORY) {
+            if (info) g_object_unref(info);
+            g_object_unref(dir); g_free(dir_path); continue;
         }
-
-        char du_cmd[512];
-        snprintf(du_cmd, sizeof(du_cmd), "du -sh '%s' 2>/dev/null | cut -f1", full_path);
-        FILE *du = popen(du_cmd, "r");
-        if(du) {
-            if(fgets(size_str, sizeof(size_str), du)) {
-                size_str[strcspn(size_str, "\n")] = 0;
-            }
-            pclose(du);
+        g_object_unref(info);
+        char *meta_path = g_build_filename(dir_path, "metadata.json", NULL);
+        char *contents = NULL, *desc = NULL;
+        if (g_file_get_contents(meta_path, &contents, NULL, NULL)) {
+            GRegex *re = g_regex_new("\\"description\\"\\\\s*:\\\\s*\\"([^\\"]*)\\"",
+                                     G_REGEX_OPTIMIZE, 0, NULL);
+            GMatchInfo *match = NULL;
+            if (g_regex_match(re, contents, 0, &match))
+                desc = g_match_info_fetch(match, 1);
+            if (match) g_match_info_free(match);
+            g_regex_unref(re);
         }
-
-        printf("%-18s %-8s %s\n", entry->d_name, size_str, desc);
-        count++;
+        char size_str[32];
+        g_format_size(mpcbits_tree_size(dir), size_str);
+        printf("%-18s %-8s %s\\n", name, size_str, desc ? desc : "Manual backup");
+        g_free(desc); g_free(contents); g_free(meta_path);
+        g_object_unref(dir); g_free(dir_path); ++count;
     }
-    closedir(d);
-    printf("----------------------------------------\n");
-    printf("Total snapshots: %d\n", count);
+    g_dir_close(d);
+    printf("----------------------------------------\\nTotal snapshots: %d\\n", count);
+    g_free(base);
 }
 
 __attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv) {
@@ -1819,6 +1914,10 @@ __attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv) {
             return 2;
         }
 
+        if (!mpcbits_valid_timestamp(argv[2])) {
+            fprintf(stderr, "Invalid snapshot timestamp. Expected YYYYMMDD_HHMMSS.\\n");
+            return 2;
+        }
         printf("↩️  Restoring from snapshot: %s\n", argv[2]);
         printf("⚠️  This will overwrite your current MPCSH binary.\n");
         printf("💡 Continue? [y/N]: ");
@@ -1856,19 +1955,30 @@ __attribute__((used)) static int mpcsh_mpcbits_builtin(char **argv) {
             return 2;
         }
 
-        char path[MPCSH_MAX_PATH];
-        const char *home = g_get_home_dir();
-        snprintf(path, sizeof(path), "%s/.local/share/mpcsh/snapshots/%s",
-                 home ? home : "/tmp", argv[2]);
-
-        char cmd[MPCSH_MAX_PATH * 2];
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-        if(system(cmd) == 0) {
-            printf("🗑️  Deleted snapshot: %s\n", argv[2]);
-        } else {
-            fprintf(stderr, "❌ Cannot delete: %s\n", strerror(errno));
+        if (!mpcbits_valid_timestamp(argv[2])) {
+            fprintf(stderr, "Invalid snapshot timestamp. Expected YYYYMMDD_HHMMSS.\n");
+            return 2;
         }
-        return 0;
+        char *base = mpcbits_snapshot_base();
+        char *path = g_build_filename(base, argv[2], NULL);
+        GFile *target = g_file_new_for_path(path);
+        GFileInfo *info = g_file_query_info(target, G_FILE_ATTRIBUTE_STANDARD_TYPE,
+            G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+        if (!info || g_file_info_get_file_type(info) != G_FILE_TYPE_DIRECTORY) {
+            fprintf(stderr, "No such snapshot: %s\n", argv[2]);
+            if (info) g_object_unref(info);
+            g_object_unref(target); g_free(path); g_free(base);
+            return 1;
+        }
+        g_object_unref(info);
+        GError *error = NULL;
+        gboolean ok = mpcbits_remove_tree(target, &error);
+        if (ok) printf("Deleted snapshot: %s\n", argv[2]);
+        else fprintf(stderr, "Cannot delete snapshot: %s\n",
+                     error ? error->message : "unknown error");
+        g_clear_error(&error);
+        g_object_unref(target); g_free(path); g_free(base);
+        return ok ? 0 : 1;
     }
 
     fprintf(stderr, "Unknown subcommand: %s\n", argv[1]);
@@ -2078,7 +2188,7 @@ mpcsh_spawn_segment(char **argv, int in_fd, int out_fd)
 
 
 /* ====================================================================
- * time  and  mpcshman   (added in 1.8.1)
+ * time  and  mpcshman   (added in 1.8)
  * ==================================================================== */
 static int mpcsh_run_pipeline(char *cmdline);
 
@@ -2412,7 +2522,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "  mpcchu_terminate(id)           close a PixelWindow\n"
     "  mpcchu_list_windows(buf,size)  the LIST reply from MPCECC\n"
     "  mpcchu_ecc_request(req,reply,size)   any control-socket request\n"
-    "These need MPCECC 1.8.1 or newer. See \"protocol\" for the requests.\n"
+    "These need MPCECC 1.8 or newer. See \"protocol\" for the requests.\n"
     "\n"
     "mpc-chuctrl\n"
     "  mpc-chuctrl list [-v]             loaded Chihuahuas\n"
@@ -2571,7 +2681,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "Firefox is always started with its own isolated profile (MPCECCWLPROFILE\n"
     "under ~/.mozilla/firefox/). Your real Firefox profile is never touched.\n"
     "\n"
-    "Since 1.8.1\n"
+    "Since 1.8\n"
     "  - Arguments with spaces are quoted correctly, so\n"
     "        windowlaunch gimp \"my picture.png\"\n"
     "    works.\n"
@@ -2594,7 +2704,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "             other terminals without a graphics protocol.\n"
     "\n"
     "The image is fitted into the terminal width and the height minus two rows.\n"
-    "Since 1.8.1 transparent pixels in the half-block mode are drawn over a\n"
+    "Since 1.8 transparent pixels in the half-block mode are drawn over a\n"
     "dark checkerboard instead of whatever colour was behind them.\n"
     "\n"
     "How MPSP works\n"
@@ -2602,7 +2712,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "  temporary directory and sends one line to the MPCECC control socket:\n"
     "        MPSP /tmp/mpcimgcat-AbC123.png\n"
     "  MPCECC loads it, shows the overlay and deletes the temporary file.\n"
-    "  Since 1.8.1 MPCECC only deletes files that look exactly like that\n"
+    "  Since 1.8 MPCECC only deletes files that look exactly like that\n"
     "  (temporary directory, mpcimgcat- prefix, .png, regular file, your own).\n"
     "  The overlay appears in the tab that sent the request.\n"
     "\n"
@@ -2658,7 +2768,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "Path: $XDG_RUNTIME_DIR/mpcecc-control.sock (or /tmp/mpcecc-control-UID.sock\n"
     "when there is no runtime directory). Mode 0600, so only you can use it.\n"
     "\n"
-    "One request per connection, ended by a newline. Since 1.8.1 a request may\n"
+    "One request per connection, ended by a newline. Since 1.8 a request may\n"
     "be up to 64 KB long and is read until the newline (2 second timeout).\n"
     "An optional prefix \"@N \" names the tab the request belongs to. mpcsh fills\n"
     "it in from $MPCECC_TAB. Without it, the selected tab is used.\n"
@@ -2683,7 +2793,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "Set by MPCECC for everything it starts\n"
     "  MPCECC=1              you are inside MPCECC\n"
     "  MPCECC_VERSION        MPCECC version\n"
-    "  MPCECC_TAB            number of the tab (1.8.1)\n"
+    "  MPCECC_TAB            number of the tab (1.8)\n"
     "Set for embedded programs\n"
     "  MPCECC_MANAGED=1, MPCECC_PIXEL_WINDOW=1\n"
     "Used for Firefox\n"
@@ -2754,7 +2864,7 @@ static const MpcshManPage mpcsh_man_pages[] = {
     "         reload and path management. See \"chihuahuas\".\n"
     "  - Works with MPCECC 1.8 (no MPCECC change needed).\n"
     "\n"
-    "1.8.1\n"
+    "1.8\n"
     "  mpcsh\n"
     "  - NEW  time COMMAND: real, user and sys report.\n"
     "  - NEW  mpcshman: multi-page manual with pager and search.\n"
@@ -3145,7 +3255,7 @@ mpcsh_run_pipeline(char *cmdline)
     if (!cmdline || !*cmdline)
         return 0;
 
-    {   /* time COMMAND ... (1.8.1) */
+    {   /* time COMMAND ... (1.8) */
         const char *tw = cmdline;
         while (*tw == ' ' || *tw == '\t') ++tw;
         if (!strncmp(tw, "time", 4) && (tw[4] == '\0' || tw[4] == ' ' || tw[4] == '\t')) {
@@ -3853,7 +3963,7 @@ static int mpcsh_source_builtin(char **argv)
 
 static const char *const mpcsh_chu_header_text =
 "/* mpcchu.h - helper API for C Chihuahuas. Written by mpc-chuctrl; do not edit.\n"
-" * API version 1. Needs MPCECC 1.8.1+ for the mpcchu_ecc_* / show / launch calls. */\n"
+" * API version 1. Needs MPCECC 1.8+ for the mpcchu_ecc_* / show / launch calls. */\n"
 "#ifndef MPCCHU_H\n"
 "#define MPCCHU_H\n"
 "#define _GNU_SOURCE\n"
@@ -4686,6 +4796,14 @@ static int mpcsh_chuctrl_builtin(char **argv)
             if (!strcmp(argv[i], "--purge")) purge = TRUE; else if (!name) name = argv[i];
         }
         if (!name) { fprintf(stderr, "Usage: mpc-chuctrl remove NAME [--purge]\n"); return 2; }
+        if (!mpcsh_chu_valid_name(name, FALSE)) {
+            fprintf(stderr, "mpc-chuctrl: bad name '%s' (lower case letters, digits, - and _)\\n", name);
+            return 2;
+        }
+        if (mpcsh_chu_is_reserved(name)) {
+            fprintf(stderr, "mpc-chuctrl: '%s' is a built-in name\\n", name);
+            return 2;
+        }
         char *dir = mpcsh_chu_dir();
         char *chu = g_build_filename(dir, name, NULL);
         char *chu_file = g_strconcat(chu, ".chu", NULL);
