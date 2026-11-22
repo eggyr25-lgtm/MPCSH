@@ -1342,6 +1342,7 @@ static int mpcsh_imgcat_builtin(char **argv);
 static int mpcsh_limits_builtin(char **argv);
 static int mpcsh_windowlaunch_builtin(char **argv);
 static int mpcsh_windowterminate_builtin(char **argv);
+static int mpcsh_windowstyle_builtin(char **argv);
 static int mpcsh_wlidlist_builtin(char **argv);
 static int mpcsh_windowpicker_builtin(char **argv);
 static int mpcsh_extension_builtin(char **argv);
@@ -2625,6 +2626,7 @@ static int mpcsh_colorit_builtin(char **argv)
                      "PixelWindows (need MPCECC, see \"windows\")\n"
                      "  windowlaunch PROGRAM   embed a GUI program in the current tab\n"
                      "  windowterminate WLID   close an embedded program\n"
+                     "  windowstyle WLID NAME  change a PixelWindow look (aero, plasma, ...)\n"
                      "  wlidlist / windowlist  list embedded programs\n"
                      "  windowpicker           window picker (talks to MPCECC like wlidlist)\n"
                      "\n"
@@ -2931,6 +2933,8 @@ static int mpcsh_colorit_builtin(char **argv)
                                              "\n"
                                              "Each launch gets a number, the wlid. The shell stays free afterwards.\n"
                                              "  windowterminate WLID       close one program\n"
+                                             "  windowstyle WLID NAME      restyle one window: aero liquidglass\n"
+                                             "                             transparentpurple plasma classic minimal\n"
                                              "  wlidlist                   id, program, title and focus flag\n"
                                              "  windowpicker               window picker\n"
                                              "\n"
@@ -3622,6 +3626,10 @@ static int mpcsh_colorit_builtin(char **argv)
              }
              if (!strcasecmp(argv[0], "windowterminate")) {
                  int result = mpcsh_windowterminate_builtin(argv);
+                 mpcsh_free_argv(argv); g_free(work); mpcsh_last_status = result; return result;
+             }
+             if (!strcasecmp(argv[0], "windowstyle")) {
+                 int result = mpcsh_windowstyle_builtin(argv);
                  mpcsh_free_argv(argv); g_free(work); mpcsh_last_status = result; return result;
              }
              if (!strcasecmp(argv[0], "wlidlist") || !strcasecmp(argv[0], "windowlist")) {
@@ -4366,7 +4374,7 @@ static int mpcsh_colorit_builtin(char **argv)
 
      static const char *const mpcsh_chu_reserved[] = {
          "cd", "pwd", "status", "set", "exit", "quit", "ctk", "portmap", "guiinterm",
-         "windowlaunch", "windowterminate", "wlidlist", "windowlist", "windowpicker",
+         "windowlaunch", "windowterminate", "windowstyle", "wlidlist", "windowlist", "windowpicker",
          "extension", "mpcextinstl", "wallpaper", "ls", "mpcimgcat", "colorit", "help",
          "limits", "mpcupdate", "mpcbits", "mpcversion", "time", "mpcshman", "math",
          "source", ".", "mpc-chuctrl", "chuctrl", "function", "if", "for", "while",
@@ -5380,6 +5388,100 @@ static int mpcsh_colorit_builtin(char **argv)
                      fprintf(stderr, "mpcsh: windowterminate: %s", rbuf);
              }
              return 0;
+         }
+
+         static int
+         mpcsh_windowstyle_builtin(char **argv)
+         {
+             static const char *const styles[] = {
+                 "aero", "liquidglass", "transparentpurple", "plasma", "classic", "minimal", NULL
+             };
+             if (!argv || !argv[0] || strcasecmp(argv[0], "windowstyle") != 0) return -1;
+
+             if (!argv[1] || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+                 puts("Usage: windowstyle <wlid> <style>\n"
+                      "       windowstyle --list\n"
+                      "Change the look of a PixelWindow (see wlidlist for the wlid).\n"
+                      "Styles: aero liquidglass transparentpurple plasma classic minimal\n"
+                      "Example:\n"
+                      "  windowlaunch firefox     # prints wlid 1\n"
+                      "  windowstyle 1 plasma");
+                 return argv[1] ? 0 : 2;
+             }
+             if (!strcmp(argv[1], "--list") || !strcmp(argv[1], "-l")) {
+                 for (int i = 0; styles[i]; ++i) puts(styles[i]);
+                 return 0;
+             }
+             if (!argv[2] || argv[3]) {
+                 fprintf(stderr, "mpcsh: windowstyle: usage: windowstyle <wlid> <style>\n");
+                 return 2;
+             }
+
+             char *end = NULL;
+             long id = strtol(argv[1], &end, 10);
+             if (!end || *end || id <= 0 || id > 1000000) {
+                 fprintf(stderr, "mpcsh: windowstyle: invalid wlid '%s' (see wlidlist)\n", argv[1]);
+                 return 2;
+             }
+
+             /* MPCECC adds whatever name it gets as a CSS class and answers OK,
+              * so check the name here and give a useful error. */
+             char *name = g_ascii_strdown(argv[2], -1);
+             int known = 0;
+             for (int i = 0; styles[i]; ++i)
+                 if (!strcmp(name, styles[i])) { known = 1; break; }
+             if (!known) {
+                 fprintf(stderr, "mpcsh: windowstyle: unknown style '%s'\n"
+                                 "  styles: aero liquidglass transparentpurple plasma classic minimal\n", argv[2]);
+                 g_free(name);
+                 return 2;
+             }
+
+             const char *runtime = g_get_user_runtime_dir();
+             char path[4096];
+             if (runtime && *runtime)
+                 snprintf(path, sizeof(path), "%s/mpcecc-control.sock", runtime);
+             else
+                 snprintf(path, sizeof(path), "/tmp/mpcecc-control-%d.sock", (int)getuid());
+
+             GError *error = NULL;
+             GSocketClient *client = g_socket_client_new();
+             GSocketAddress *addr = g_unix_socket_address_new(path);
+             GSocketConnection *conn = g_socket_client_connect(client, G_SOCKET_CONNECTABLE(addr), NULL, &error);
+             g_object_unref(addr);
+             g_object_unref(client);
+             if (!conn) {
+                 fprintf(stderr, "mpcsh: windowstyle: MPCECC not running (%s)\n",
+                         error ? error->message : "no socket");
+                 g_clear_error(&error);
+                 g_free(name);
+                 return 1;
+             }
+             GOutputStream *out = g_io_stream_get_output_stream(G_IO_STREAM(conn));
+             GInputStream *in  = g_io_stream_get_input_stream(G_IO_STREAM(conn));
+             char req[128];
+             snprintf(req, sizeof req, "STYLE %ld %s\n", id, name);
+             gboolean sent = g_output_stream_write_all(out, req, strlen(req), NULL, NULL, NULL);
+             char rbuf[256];
+             gssize rn = sent ? g_input_stream_read(in, rbuf, sizeof(rbuf) - 1, NULL, NULL) : -1;
+             g_object_unref(conn);
+
+             int rc = 1;
+             if (rn > 0) {
+                 rbuf[rn] = 0;
+                 if (g_str_has_prefix(rbuf, "OK")) {
+                     printf("windowstyle: wlid %ld is now %s\n", id, name);
+                     rc = 0;
+                 } else if (g_str_has_prefix(rbuf, "ERR no such wlid")) {
+                     fprintf(stderr, "mpcsh: windowstyle: no window with wlid %ld (see wlidlist)\n", id);
+                 } else {
+                     fprintf(stderr, "mpcsh: windowstyle: %s", rbuf);
+                 }
+             } else {
+                 fprintf(stderr, "mpcsh: windowstyle: no reply from MPCECC\n");
+             }
+             g_free(name);
+             return rc;
          }
 
          static int
@@ -7327,7 +7429,7 @@ static int mpcsh_colorit_builtin(char **argv)
           *    column menu, then further Tab / Shift+Tab cycle through matches.
           * ------------------------------------------------------------------ */
          static const char *const mpcsh_builtin_names[] = {
-             "cd", "pwd", "status", "set", "exit", "ctk", "portmap", "guiinterm", "windowlaunch", "windowterminate", "wlidlist", "extension",
+             "cd", "pwd", "status", "set", "exit", "ctk", "portmap", "guiinterm", "windowlaunch", "windowterminate", "windowstyle", "wlidlist", "extension",
              "wallpaper", "ls", "mpcimgcat", "colorit", "help", "limits", "time", "mpcshman", "math", "source", "mpc-chuctrl", NULL
          };
 
